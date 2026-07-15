@@ -1,6 +1,11 @@
-host_address: '172.24.71.206'
+host_address: '192.168.0.181'
 left_xarm_ip: '192.168.86.216'
 right_xarm_ip: '192.168.86.230'
+
+# Inspire RH56 dexterous hand (Modbus TCP) - change these when the hand's
+# network changes; referenced by configs/robot/inspire_franka.yaml.
+inspire_hand_ip: '192.168.11.210'
+inspire_hand_port: 6000
 
 # Transformation ports
 oculus_reciever_port: 8087

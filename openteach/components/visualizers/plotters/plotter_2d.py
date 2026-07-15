@@ -87,6 +87,10 @@ class PlotHand2D(Plotter):
         plot = cv2.imread(VR_2D_PLOT_SAVE_PATH)
         self.socket.send_image(plot)
 
-        # Resetting and pausing the 3D plot
-        plt.pause(0.001) # This make the graph show up if matplotlib is in Tkinter mode
+        # Resetting and pausing the 3D plot. plt.pause() only matters for an
+        # interactive (e.g. Tkinter) backend; with the Agg backend used when
+        # display_plot is False it just spams a UserWarning every frame, so skip
+        # it unless we are actually displaying locally.
+        if self.display_plot:
+            plt.pause(0.001)
         plt.cla()

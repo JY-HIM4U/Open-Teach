@@ -1,6 +1,6 @@
-robot_name: franka_arm
+robot_name: inspire_franka
 
-# Detector used to teleoperate the robot
+# Detection from the oculus
 detector:
   _target_: openteach.components.detector.oculus.OculusVRHandDetector
   host: ${host_address}
@@ -11,9 +11,9 @@ detector:
   teleop_reset_port: ${teleop_reset_port}
   teleop_reset_publish_port: ${teleop_reset_publish_port}
 
-# Transformation classes used to transform the keypoints
+# Transforming the keypoints from the oculus
 transforms:
-  - 
+  -
     _target_: openteach.components.detector.keypoint_transform.TransformHandPositionCoords
     host: ${host_address}
     keypoint_port: ${keypoint_port}
@@ -29,8 +29,24 @@ visualizers:
     oculus_feedback_port: ${oculus_graph_port}
     display_plot: ${visualize_right_2d}
 
-# Operators used to retarget the keypoints
+# Operators: BOTH run as separate processes off the same keypoint stream.
 operators:
+  # Inspire RH56 dexterous hand (fingers)
+  -
+    _target_: openteach.components.operators.inspire_hand.InspireHandOperator
+    host: ${host_address}
+    transformed_keypoints_port: ${transformed_position_keypoint_port}
+    ip: ${inspire_hand_ip}           # set in configs/network.yaml
+    port: ${inspire_hand_port}       # set in configs/network.yaml
+    generation: 3
+    speed: 1000
+    dry_run: ${dry_run}
+    # Per-DOF calibration [open_flexion, closed_flexion] in summed-degrees.
+    # CALIBRATE with inspire_hand_test.py and paste your values here. Order:
+    # 0 little, 1 ring, 2 middle, 3 index, 4 thumb_bend, 5 thumb_rot.
+    calibration: null
+
+  # Franka arm (end-effector pose)
   -
     _target_: openteach.components.operators.franka.FrankaArmOperator
     host: ${host_address}
@@ -41,15 +57,14 @@ operators:
     dry_run: ${dry_run}
     flip_vertical: True
 
-# List of controller classes used
+# Controllers instantiated for recording (data collection). The hand is driven
+# by its operator directly, so no separate controller class is needed for it.
 controllers:
   -
     _target_: openteach.robot.franka.FrankaArm
     record: False
 
-
-# Information to be recorded by the robot 
 recorded_data:
-  - 
+  -
     - joint_states
     - cartesian_states

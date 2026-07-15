@@ -4,7 +4,6 @@ import time
 
 from sensor_msgs.msg import JointState
 from geometry_msgs.msg import PoseStamped
-from allegro_hand.controller import AllegroController
 from franka_arm.controller import FrankaController
 from copy import deepcopy as copy
 
@@ -49,6 +48,7 @@ class DexArmControl():
 
     # Controller initializers
     def _init_allegro_hand_control(self):
+        from allegro_hand.controller import AllegroController
         self.allegro = AllegroController()
 
         self.allegro_joint_state = None
