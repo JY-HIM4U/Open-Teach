@@ -166,6 +166,10 @@ class DexArmControl():
 
         return joint_state
     
+    def get_arm_proprio_state(self):
+        # q/dq/tau_J/wrench from the latest Franka state (proprioception + F/T).
+        return self.franka.get_proprio_state()
+
     def get_arm_pose(self):
         pose = copy(self.franka.get_pose())
 

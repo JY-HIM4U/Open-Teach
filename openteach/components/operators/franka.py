@@ -12,6 +12,7 @@ from openteach.utils.network import ZMQKeypointSubscriber
 from openteach.utils.vectorops import *
 from openteach.utils.files import *
 from openteach.robot.franka import FrankaArm
+from openteach.utils.kinematics_recorder import SegmentRecorder
 from scipy.spatial.transform import Rotation, Slerp
 from .operator import Operator
 
@@ -55,13 +56,48 @@ class FrankaArmOperator(Operator):
         teleoperation_reset_port = None,
         dry_run = False,
         flip_vertical = False,
+        axis_remap = None,
+        filter_comp_ratio = 0.5,
+        workspace_box = 0.2,
+        orient_follow = True,
+        orient_remap = None,
+        orient_flip = None,
+        orient_glitch_deg = 30.0,
     ):
         self.notify_component_start('franka arm operator')
+        # Half-size (m) of the per-axis workspace clamp box around the reset
+        # pose. Larger = more reach before the target is clamped. Configurable.
+        self.workspace_box = float(workspace_box)
+        # ---- Orientation mapping ----
+        # The original code only mapped wrist orientation through the Allegro
+        # mount rotation, with no Unity->robot handedness fix (position got
+        # axis_remap + flip_vertical, orientation got nothing) -> the robot
+        # didn't follow the wrist. When orient_follow is True we instead express
+        # the relative wrist rotation in the robot frame by conjugating it with
+        # a calibratable basis C (R_robot = C @ R_hand @ C^T), same idea as the
+        # position axis_remap. C defaults to axis_remap; orient_remap overrides
+        # it; orient_flip = [sx,sy,sz] of +/-1 folds in axis reflections to fix
+        # an inverted rotation axis. orient_follow=False = old behaviour.
+        self.orient_follow = bool(orient_follow)
+        C = np.array(orient_remap, dtype=float) if orient_remap is not None else (
+            np.array(axis_remap, dtype=float) if axis_remap is not None else np.eye(3))
+        if orient_flip is not None:
+            C = np.diag(np.array(orient_flip, dtype=float)) @ C
+        self._orient_C = C
+        # Reject wrist-orientation jumps larger than this per frame (deg). 0 off.
+        self._orient_glitch_rad = np.radians(float(orient_glitch_deg))
+        self._prev_wrist_R = None
         # Correct the Unity(left-handed, Y-up) vs robot(right-handed, Z-up)
         # handedness mismatch that makes hand-up map to robot-down. When True,
         # the vertical component of the mapped displacement is negated so
         # hand-up -> robot-up. Only affects vertical translation.
         self.flip_vertical = flip_vertical
+        # Optional 3x3 world->robot axis-remap applied to the mapped displacement
+        # from the reset pose. Calibrated per setup (which way the robot base
+        # faces relative to you). Default identity = no change. Rows map to robot
+        # [X,Y,Z]; e.g. [[0,0,1],[1,0,0],[0,1,0]] means hand-forward->robot X,
+        # hand-right->robot Y, hand-up->robot Z. See docs/franka_validation.md.
+        self.axis_remap = np.array(axis_remap, dtype=float) if axis_remap is not None else np.eye(3)
         # Safety/validation flag. When True, everything runs normally
         # (streaming, state reading, retargeting, logging) but NO command is
         # ever sent to the robot -> the arm cannot move. See
@@ -118,9 +154,32 @@ class FrankaArmOperator(Operator):
         self.use_filter = use_filter
         if use_filter:
             robot_init_cart = self._homo2cart(self.robot_init_H)
-            self.comp_filter = Filter(robot_init_cart, comp_ratio=0.8)
+            # comp_ratio: fraction of the OLD pose kept each frame. Higher =
+            # smoother but MORE lag (0.8 gave ~300 ms lag -> sluggish arm).
+            # 0.5 keeps input clean (VR jitter is ~1 mm) with far less lag.
+            self.comp_filter = Filter(robot_init_cart, comp_ratio=filter_comp_ratio)
 
         self._timer = FrequencyTimer(VR_FREQ)
+
+        # Kinematics recorder (toggled from record_ctl.py). Logs the commanded
+        # end-effector target pose + teleop state each accepted frame, dry or real.
+        self._recorder = SegmentRecorder(
+            'arm',
+            ['mode', 'teleop_state', 'res_scale', 'clamped',
+             # commanded target pose (what we tell the robot to reach)
+             'tgt_x', 'tgt_y', 'tgt_z', 'quat0', 'quat1', 'quat2', 'quat3',
+             # ACTUAL robot pose this frame (where the arm really is) -> compare
+             # cur_* vs tgt_* to see tracking error / lag.
+             'cur_x', 'cur_y', 'cur_z', 'cur_q0', 'cur_q1', 'cur_q2', 'cur_q3',
+             # Proprioception (7 joints): position q, velocity dq, torque tau
+             'q0', 'q1', 'q2', 'q3', 'q4', 'q5', 'q6',
+             'dq0', 'dq1', 'dq2', 'dq3', 'dq4', 'dq5', 'dq6',
+             'tau0', 'tau1', 'tau2', 'tau3', 'tau4', 'tau5', 'tau6',
+             # External Cartesian wrench (force/torque at EE): Fx Fy Fz Tx Ty Tz
+             'Fx', 'Fy', 'Fz', 'Tx', 'Ty', 'Tz',
+             # RAW wrist orientation (Quest hand frame) quaternion -> used to
+             # calibrate the wrist->robot rotation mapping (orient_remap).
+             'wq0', 'wq1', 'wq2', 'wq3'])
 
     @property
     def timer(self):
@@ -243,6 +302,7 @@ class FrankaArmOperator(Operator):
         # Clear the jump guard so the first frame after a reset/resume is
         # accepted (it snaps target to the robot's current pose -> ~0 motion).
         self._prev_sent_pos = None
+        self._prev_wrist_R = None   # reset the wrist-orientation glitch guard too
         # Center the workspace clamp box on the robot pose at this reset.
         self._clamp_center = self._homo2cart(self.robot_init_H)[:3].copy()
         return first_hand_frame
@@ -271,6 +331,21 @@ class FrankaArmOperator(Operator):
         # Get the moving hand frame
         self.hand_moving_H = self._turn_frame_to_homo_mat(moving_hand_frame)
 
+        # ---- Wrist-orientation glitch guard ----
+        # The Quest hand frame occasionally sign-flips ~180 deg for a frame or
+        # two (mostly during roll/twist, when the palm turns edge-on). The
+        # smoothing filter averages a flip-and-back into ~zero rotation, so the
+        # robot fails to follow roll. Reject any wrist rotation that jumps more
+        # than orient_glitch_deg in one frame and hold the last good orientation.
+        Rw = self.hand_moving_H[:3, :3]
+        if self._orient_glitch_rad > 0 and self._prev_wrist_R is not None:
+            dR = Rw @ self._prev_wrist_R.T
+            ang = np.arccos(np.clip((np.trace(dR) - 1.0) / 2.0, -1.0, 1.0))
+            if ang > self._orient_glitch_rad:
+                Rw = self._prev_wrist_R            # glitch -> hold last good
+                self.hand_moving_H[:3, :3] = Rw
+        self._prev_wrist_R = Rw.copy()
+
         # Transformation code
         H_HI_HH = copy(self.hand_init_H) # Homo matrix that takes P_HI  to P_HH - Point in Inital Hand Frame to Point in current hand Frame
         H_HT_HH = copy(self.hand_moving_H) # Homo matrix that takes P_HT to P_HH
@@ -286,13 +361,25 @@ class FrankaArmOperator(Operator):
         H_HT_HI = np.linalg.pinv(H_HI_HH) @ H_HT_HH # Homo matrix that takes P_HT to P_HI
         H_RT_RH = H_RI_RH @ H_A_R @ H_HT_HI @ np.linalg.pinv(H_A_R) # Homo matrix that takes P_RT to P_RH
 
-        # Vertical-axis handedness correction (Unity Y-up left-handed vs robot
-        # Z-up right-handed made hand-up map to robot-down). Negate the vertical
-        # component of the displacement from the reset pose so hand-up -> robot-up.
+        # World->robot axis calibration on the displacement from the reset pose:
+        # first the configurable axis_remap (which robot axis each hand direction
+        # drives), then the optional vertical flip. Identity remap + no flip
+        # reproduces the original behaviour.
+        disp = H_RT_RH[:3, 3] - H_RI_RH[:3, 3]
+        disp = self.axis_remap @ disp
         if self.flip_vertical:
-            disp = H_RT_RH[:3, 3] - H_RI_RH[:3, 3]
             disp[2] = -disp[2]
-            H_RT_RH[:3, 3] = H_RI_RH[:3, 3] + disp
+        H_RT_RH[:3, 3] = H_RI_RH[:3, 3] + disp
+
+        # Orientation: make the EE actually follow the wrist. Take the relative
+        # wrist rotation (init -> now) and express it in the robot frame via the
+        # calibratable basis C, then apply it to the robot's reset orientation.
+        # This replaces the Allegro-only rotation that ignored handedness.
+        if self.orient_follow:
+            R_rel = H_HT_HI[:3, :3]                     # relative wrist rotation
+            C = self._orient_C
+            R_robot_rel = C @ R_rel @ C.T               # into the robot frame
+            H_RT_RH[:3, :3] = H_RI_RH[:3, :3] @ R_robot_rel
 
         self.robot_moving_H = copy(H_RT_RH)
 
@@ -308,8 +395,8 @@ class FrankaArmOperator(Operator):
         # of reach. Orientation is left unclamped.
         clamped = False
         if self._clamp_center is not None:
-            lo = self._clamp_center - WORKSPACE_BOX_M
-            hi = self._clamp_center + WORKSPACE_BOX_M
+            lo = self._clamp_center - self.workspace_box
+            hi = self._clamp_center + self.workspace_box
             clamped_pos = np.clip(final_pose[:3], lo, hi)
             clamped = not np.allclose(clamped_pos, final_pose[:3])
             final_pose[:3] = clamped_pos
@@ -334,6 +421,57 @@ class FrankaArmOperator(Operator):
             return
         # Accepted: remember it as the reference for the next frame's jump check.
         self._prev_sent_pos = final_pose[:3].copy()
+
+        # Record the commanded target every accepted frame (~60 Hz), dry or real.
+        row = {
+            'mode': 'dry' if self.dry_run else 'real',
+            'teleop_state': self.arm_teleop_state,
+            'res_scale': round(float(self.resolution_scale), 3),
+            'clamped': int(bool(clamped)),
+            'tgt_x': round(float(final_pose[0]), 5),
+            'tgt_y': round(float(final_pose[1]), 5),
+            'tgt_z': round(float(final_pose[2]), 5),
+            'quat0': round(float(final_pose[3]), 5),
+            'quat1': round(float(final_pose[4]), 5),
+            'quat2': round(float(final_pose[5]), 5),
+            'quat3': round(float(final_pose[6]), 5),
+        }
+        # Only query the ACTUAL robot pose while recording, so the control loop
+        # isn't burdened by a state read when no session is active.
+        if self._recorder.is_active():
+            cur = self._homo2cart(self.robot.get_pose()['position'])
+            row.update({
+                'cur_x': round(float(cur[0]), 5),
+                'cur_y': round(float(cur[1]), 5),
+                'cur_z': round(float(cur[2]), 5),
+                'cur_q0': round(float(cur[3]), 5),
+                'cur_q1': round(float(cur[4]), 5),
+                'cur_q2': round(float(cur[5]), 5),
+                'cur_q3': round(float(cur[6]), 5),
+            })
+            # Proprioception + F/T (all from the latest local state buffer, cheap)
+            try:
+                p = self.robot.get_proprio_state()
+                for name, key, n in (('q', 'q', 7), ('dq', 'dq', 7), ('tau', 'tau_J', 7)):
+                    vec = p.get(key)
+                    if vec is not None:
+                        for i in range(min(n, len(vec))):
+                            row['%s%d' % (name, i)] = round(float(vec[i]), 5)
+                w = p.get('wrench')
+                if w is not None and len(w) >= 6:
+                    for lbl, i in (('Fx', 0), ('Fy', 1), ('Fz', 2), ('Tx', 3), ('Ty', 4), ('Tz', 5)):
+                        row[lbl] = round(float(w[i]), 5)
+            except Exception as e:
+                if self._dry_run_counter % 120 == 0:
+                    print('[REC] proprio read failed: %s' % e)
+            # Raw wrist orientation (Quest hand frame) for orientation calibration.
+            try:
+                wq = Rotation.from_matrix(self.hand_moving_H[:3, :3]).as_quat()
+                for i in range(4):
+                    row['wq%d' % i] = round(float(wq[i]), 5)
+            except Exception:
+                pass
+        self._recorder.maybe_log(row)
 
         if self.dry_run:
             # Validation mode: log the computed target instead of moving.
@@ -390,5 +528,6 @@ class FrankaArmOperator(Operator):
             except KeyboardInterrupt:
                 break
 
+        self._recorder.close()
         self.transformed_arm_keypoint_subscriber.stop()
         print('Stopping the teleoperator!')

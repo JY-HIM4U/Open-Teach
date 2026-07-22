@@ -18,7 +18,11 @@ transforms:
     host: ${host_address}
     keypoint_port: ${keypoint_port}
     transformation_port: ${transformed_position_keypoint_port}
-    moving_average_limit: 1
+    moving_average_limit: 1        # 1 = no averaging (min). Raising smooths but adds lag.
+    # Keep the reconstructed palm normal on a continuous branch so cross(index,pinky)
+    # sign-flips don't invert the wrist frame ~180deg -> lets the arm follow wrist ROLL.
+    # Set False to restore the old (flip-prone) behaviour.
+    sign_continuity: True
 
 # Visualizers used to visualize the keypoints stream
 visualizers:
@@ -38,13 +42,26 @@ operators:
     transformed_keypoints_port: ${transformed_position_keypoint_port}
     ip: ${inspire_hand_ip}           # set in configs/network.yaml
     port: ${inspire_hand_port}       # set in configs/network.yaml
-    generation: 3
+    generation: 4          # RH56 is Gen 4 (has tactile sensors); was mislabeled 3
     speed: 1000
-    dry_run: ${dry_run}
+    # Grip-force cap (FORCE_SET, 0-1000; lower = gentler). Protects fingers
+    # from over-driving into objects/joints. Raise for a firmer grasp.
+    force: 500
+    dry_run: ${hand_dry_run}
+    # Share the arm's pause/resume gesture (from the Quest): index+thumb pinch
+    # freezes BOTH arm and hand; middle+thumb resumes. Same signal the arm uses.
+    teleoperation_reset_port: ${teleop_reset_publish_port}
+    respect_teleop_pause: True   # freeze the hand while teleop is paused
+    record_on_teleop: True       # start/stop CSV logging with resume/pause pinch
     # Per-DOF calibration [open_flexion, closed_flexion] in summed-degrees.
     # CALIBRATE with inspire_hand_test.py and paste your values here. Order:
     # 0 little, 1 ring, 2 middle, 3 index, 4 thumb_bend, 5 thumb_rot.
     calibration: null
+    # Thumb rotation (DOF5) from the Quest is noisy and ruins pinching, so we
+    # LOCK it at a fixed opposition angle (0-1000) and pinch with thumb-bend +
+    # fingers. Find your best value with:  python thumb_rot_sweep.py
+    # null = retarget it from the hand (not recommended).
+    thumb_rot_fixed: ${thumb_rot_fixed}
 
   # Franka arm (end-effector pose)
   -
@@ -53,9 +70,33 @@ operators:
     transformed_keypoints_port: ${transformed_position_keypoint_port}
     arm_resolution_port: ${resolution_button_publish_port}
     use_filter: True
+    # Smoothing of the commanded pose. Higher = smoother but laggier.
+    # 0.8 was sluggish (~300 ms lag); 0.5 is far more responsive. Lower toward
+    # 0.0 for near-raw tracking if the arm still feels behind your hand.
+    filter_comp_ratio: 0.5
+    # Safety boundary: half-size (m) of the per-axis clamp box around the reset
+    # pose. 0.2 = +/-20 cm. Increase for more reach (was hitting the clamp a lot).
+    workspace_box: ${workspace_box}
     teleoperation_reset_port: ${teleop_reset_publish_port}
-    dry_run: ${dry_run}
-    flip_vertical: True
+    dry_run: ${arm_dry_run}
+    flip_vertical: False
+    # Wrist-orientation following. orient_follow makes the EE track your wrist
+    # (was broken: only position had the handedness fix). Calibrate with
+    # orient_flip=[sx,sy,sz] (+/-1) if a rotation axis is inverted; orient_remap
+    # is an advanced 3x3 override (null = reuse axis_remap).
+    orient_follow: ${orient_follow}
+    orient_flip: ${orient_flip}
+    orient_remap: null
+    # Reject wrist-orientation jumps larger than this in one frame (deg), holding
+    # the last good orientation. With sign-continuity fixing flips at the source,
+    # this is just a light safety net for rare 1-frame spikes. 45 (was 30) leaves
+    # margin above genuine fast roll (~29 deg/frame measured) so real roll isn't clipped.
+    orient_glitch_deg: 45.0
+    # World->robot axis calibration (from the 3-direction dry-run test).
+    axis_remap:
+      - [0, 0, 1]
+      - [1, 0, 0]
+      - [0, 1, 0]
 
 # Controllers instantiated for recording (data collection). The hand is driven
 # by its operator directly, so no separate controller class is needed for it.

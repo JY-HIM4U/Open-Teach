@@ -65,12 +65,18 @@ def _map(flex, open_val, closed_val):
 
 
 class InspireRetargeter:
-    def __init__(self, calibration=None):
+    def __init__(self, calibration=None, thumb_rot_fixed=None):
         # calibration: dict {dof_index: [open_val, closed_val]}
         self.calib = dict(DEFAULT_CALIB)
         if calibration:
             for k, v in calibration.items():
                 self.calib[int(k)] = (float(v[0]), float(v[1]))
+        # DOF5 (thumb rotation) from the Quest is noisy and entangled with the
+        # thumb bend, which wrecks pinching. If thumb_rot_fixed is set, we LOCK
+        # DOF5 to that constant (a good opposition angle for pinching) instead
+        # of retargeting it. None -> retarget as before.
+        self.thumb_rot_fixed = (None if thumb_rot_fixed is None
+                                else max(0, min(1000, int(thumb_rot_fixed))))
 
     def raw_flexions(self, hand_coords):
         """Return the raw flexion metrics per DOF (useful for calibration)."""
@@ -84,4 +90,7 @@ class InspireRetargeter:
     def retarget(self, hand_coords):
         """hand_coords: (24,3) transformed hand keypoints -> [6] angle commands."""
         flex = self.raw_flexions(hand_coords)
-        return [_map(flex[d], *self.calib[d]) for d in range(6)]
+        cmd = [_map(flex[d], *self.calib[d]) for d in range(6)]
+        if self.thumb_rot_fixed is not None:
+            cmd[5] = self.thumb_rot_fixed   # lock thumb rotation for stable pinch
+        return cmd

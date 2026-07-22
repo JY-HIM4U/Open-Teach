@@ -39,7 +39,14 @@ operators:
     use_filter: True
     teleoperation_reset_port: ${teleop_reset_publish_port}
     dry_run: ${dry_run}
-    flip_vertical: True
+    flip_vertical: False
+    # World->robot axis calibration (from the 3-direction dry-run test).
+    # Rows = robot [X,Y,Z]; here hand-forward->X, hand-right->Y, hand-up->Z.
+    # Flip a row's sign if that direction feels mirrored. See docs.
+    axis_remap:
+      - [0, 0, 1]
+      - [1, 0, 0]
+      - [0, 1, 0]
 
 # List of controller classes used
 controllers:

@@ -46,6 +46,10 @@ class FrankaArm(RobotWrapper):
     def get_pose(self):
         return self._controller.get_arm_pose()
 
+    def get_proprio_state(self):
+        # q, dq, tau_J, external wrench (F/T) from the latest robot state.
+        return self._controller.get_arm_proprio_state()
+
     # Movement functions
     def home(self):
         return self._controller.home_arm()

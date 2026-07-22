@@ -19,6 +19,8 @@ DOF order (6): [little, ring, middle, index, thumb_bend, thumb_rot]
 Angle: 1000 = OPEN, 0 = CLOSED.
 """
 
+import numpy as np
+
 from openteach.robot.inspire.inspire_hand_api import DOF_NAMES, NUM_DOF
 
 
@@ -46,35 +48,55 @@ class InspireHandTCP:
         cmd = [max(0, min(1000, int(round(a)))) for a in angles]
         if self.dry_run:
             return cmd
-        self._api.set_angle(cmd)
+        # vendor inspire_demos requires a numpy int array (rejects lists)
+        self._api.set_angle(np.asarray(cmd, dtype=np.int32))
         return cmd
 
     def get_angles(self):
         """Actual angle of all 6 DOF (0-1000), or None on failure."""
         if self.dry_run:
             return [0] * NUM_DOF
-        return self._api.getangleact()
+        return self._api.get_angle_actual()   # inspire_demos v0.2.0 API
+
+    def get_force(self):
+        """Actual per-DOF force reading (FORCE_ACT, 6 values), or zeros in dry-run."""
+        if self.dry_run:
+            return [0] * NUM_DOF
+        try:
+            return list(self._api.get_force_actual())
+        except Exception as e:
+            print('[inspire] get_force failed: %s' % e)
+            return [0] * NUM_DOF
 
     def set_speed(self, speeds):
-        """Optional: set per-DOF speed if the library supports it (guarded)."""
+        """Set per-DOF motion speed (0-1000)."""
         if self.dry_run:
             return
-        fn = getattr(self._api, 'set_speed', None)
-        if fn is not None:
-            try:
-                fn(speeds)
-            except Exception as e:
-                print('[inspire] set_speed not applied: %s' % e)
+        try:
+            self._api.set_speed(np.asarray(speeds, dtype=np.int32))
+        except Exception as e:
+            print('[inspire] set_speed not applied: %s' % e)
+
+    def set_force(self, forces):
+        """Set per-DOF force threshold (FORCE_SET, 0-1000; lower = gentler grip).
+        Values are clamped to [0,1000] so a bad config can't command out of range."""
+        assert len(forces) == NUM_DOF, 'expected 6 force values'
+        cmd = [max(0, min(1000, int(round(f)))) for f in forces]
+        if self.dry_run:
+            return cmd
+        try:
+            self._api.set_force(np.asarray(cmd, dtype=np.int32))
+        except Exception as e:
+            print('[inspire] set_force not applied: %s' % e)
+        return cmd
 
     def clear_error(self):
         if self.dry_run:
             return
-        fn = getattr(self._api, 'clear_error', None) or getattr(self._api, 'clearerror', None)
-        if fn is not None:
-            try:
-                fn()
-            except Exception as e:
-                print('[inspire] clear_error not applied: %s' % e)
+        try:
+            self._api.reset_error()
+        except Exception as e:
+            print('[inspire] reset_error not applied: %s' % e)
 
     def open_hand(self):
         self.set_angles([1000] * NUM_DOF)
