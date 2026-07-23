@@ -25,12 +25,12 @@ arm_dry_run: ${dry_run}
 
 # Tunables you can override on the CLI (e.g. thumb_rot_fixed=null workspace_box=0.5).
 # Used by robot=inspire_franka.
-thumb_rot_fixed: 500     # lock thumb rotation (0-1000); null = retarget it
+thumb_rot_fixed: null # 500     # lock thumb rotation (0-1000); null = retarget it
 workspace_box: 0.35      # half-size (m) of the arm safety clamp box (+/- per axis)
 
 # Wrist-orientation following for the arm.
 orient_follow: true      # true = EE follows your wrist rotation; false = old behaviour
-orient_flip: null        # e.g. [1,1,-1] to invert a rotation axis during calibration
+orient_flip: [-1, 1, -1] # invert robot-Y(pitch) & robot-Z(yaw), keep robot-X(roll). Calibrated 2026-07-23.
 
 # Visualize 3D and 2D plots
 visualize_xela: false

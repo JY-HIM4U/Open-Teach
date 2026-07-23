@@ -1,13 +1,37 @@
 # Orientation Pipeline Redesign Plan
 
-**Status: proposed, not yet implemented.** This replaces the empirical
-`orient_remap` / `orient_flip` calibration described in
-`docs/hand_to_robot_mapping.md` §9.5–9.6 with a deterministic four-stage
-architecture: (1) source handedness conversion, (2) one fixed frame transform
-`C`, (3) clutch with an explicit spatial-delta convention, (4) glitch
-filtering. **Position mapping and robot tracking are untouched.**
+**Status: core implemented (2026-07-23), rest deferred.** This plan proposed a
+deterministic four-stage architecture: (1) source handedness conversion, (2)
+one fixed frame transform `C`, (3) clutch with an explicit spatial-delta
+convention, (4) glitch filtering. **Position mapping and robot tracking are
+untouched.**
 
-Estimated effort: 1–2 days implementation, half a day validation.
+**Implemented (Phase 3 core — the reset-independence fix):**
+- `orientation_mode: body | spatial` config knob (`inspire_franka.yaml`,
+  `FrankaArmOperator`). `body` (default) = the existing legacy behavior;
+  `spatial` = the reset-independent world-delta / pre-multiply mapping (§3.2).
+- Mapping math extracted to `openteach/utils/orientation.py`
+  (`map_relative_orientation`, `project_so3`) — import-light and unit-tested.
+- Property tests in `tests/test_orientation_mapping.py` **prove** spatial is
+  reset-independent and body is not (Phase 3 property test; §9.3 is dead for
+  spatial). All pass with no hardware.
+- SO(3) projection applied to the commanded orientation (Phase 1.1 idea).
+
+**Corrected premise:** Phase 0.3 / §9.3 assumed the current operator *mixes*
+spatial and body deltas. It does not — audit confirmed it is a clean, consistent
+**body-delta post-multiply**. That is not a bug; it is a valid design choice
+that happens to be reset-*pose*-dependent. `spatial` mode is therefore an
+alternative mapping, not a bug fix, and is offered opt-in rather than forced.
+
+**Deferred (need hardware and/or are premature to force):**
+- Phase 0.1 provenance check and Phase 1 handedness-source layer — `det(axis_remap)=+1`
+  (no embedded reflection) and `orient_flip` cover handedness today; ripping it
+  out needs the Quest provenance test first.
+- Phase 2.2 deprecating / refusing-to-start on `orient_remap`/`orient_flip` —
+  would break working configs for no safety gain; kept working.
+- Phases 5 (hardware validation) and the legacy-path deletion.
+
+Estimated remaining effort: half a day validation once on the arm.
 
 Background: `docs/hand_to_robot_mapping.md` §9.3 ("Everything is measured
 relative to a reset") is the specific defect this plan eliminates — the

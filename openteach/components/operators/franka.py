@@ -13,6 +13,7 @@ from openteach.utils.vectorops import *
 from openteach.utils.files import *
 from openteach.robot.franka import FrankaArm
 from openteach.utils.kinematics_recorder import SegmentRecorder
+from openteach.utils.orientation import map_relative_orientation
 from scipy.spatial.transform import Rotation, Slerp
 from .operator import Operator
 
@@ -63,6 +64,7 @@ class FrankaArmOperator(Operator):
         orient_remap = None,
         orient_flip = None,
         orient_glitch_deg = 30.0,
+        orientation_mode = 'body',
     ):
         self.notify_component_start('franka arm operator')
         # Half-size (m) of the per-axis workspace clamp box around the reset
@@ -84,12 +86,27 @@ class FrankaArmOperator(Operator):
         if orient_flip is not None:
             C = np.diag(np.array(orient_flip, dtype=float)) @ C
         self._orient_C = C
+        # orientation_mode: how the relative wrist rotation is applied to the EE.
+        #   'body'    (default, legacy): body delta post-multiplied onto the
+        #             robot reset orientation -> R_ee = R_robot0 @ (C dR_body C^T).
+        #             The base-frame axis you drive depends on the robot's reset
+        #             orientation (see docs/hand_to_robot_mapping.md §9.3), so the
+        #             axis map must be recalibrated if you reset in a new pose.
+        #   'spatial' (reset-independent): world delta pre-multiplied ->
+        #             R_ee = (C dR_world C^T) @ R_robot0. The base-frame axis is a
+        #             fixed function of C only, independent of either reset pose;
+        #             calibrate C once and trust it. See
+        #             docs/orientation_pipeline_redesign.md.
+        self.orientation_mode = str(orientation_mode).lower()
+        if self.orientation_mode not in ('body', 'spatial'):
+            raise ValueError("orientation_mode must be 'body' or 'spatial', got %r"
+                             % orientation_mode)
         # Reject wrist-orientation jumps larger than this per frame (deg). 0 off.
         self._orient_glitch_rad = np.radians(float(orient_glitch_deg))
         self._prev_wrist_R = None
-        print('[franka operator] BUILD 2026-07-22b : orient glitch guard '
-              'ACTIVE (orient_glitch_deg=%s, orient_follow=%s) + wpos logging'
-              % (orient_glitch_deg, self.orient_follow if hasattr(self, "orient_follow") else "?"),
+        print('[franka operator] BUILD 2026-07-23 : orient glitch guard ACTIVE '
+              '(orient_glitch_deg=%s, orient_follow=%s, orientation_mode=%s) + wpos logging'
+              % (orient_glitch_deg, self.orient_follow, self.orientation_mode),
               flush=True)
         # Correct the Unity(left-handed, Y-up) vs robot(right-handed, Z-up)
         # handedness mismatch that makes hand-up map to robot-down. When True,
@@ -386,10 +403,14 @@ class FrankaArmOperator(Operator):
         # calibratable basis C, then apply it to the robot's reset orientation.
         # This replaces the Allegro-only rotation that ignored handedness.
         if self.orient_follow:
-            R_rel = H_HT_HI[:3, :3]                     # relative wrist rotation
-            C = self._orient_C
-            R_robot_rel = C @ R_rel @ C.T               # into the robot frame
-            H_RT_RH[:3, :3] = H_RI_RH[:3, :3] @ R_robot_rel
+            # body    (legacy): reset-pose dependent (docs §9.3).
+            # spatial         : reset-independent (docs/orientation_pipeline_redesign.md).
+            H_RT_RH[:3, :3] = map_relative_orientation(
+                R_hand_now=self.hand_moving_H[:3, :3],
+                R_hand_reset=self.hand_init_H[:3, :3],
+                R_robot_reset=H_RI_RH[:3, :3],
+                C=self._orient_C,
+                mode=self.orientation_mode)
 
         self.robot_moving_H = copy(H_RT_RH)
 

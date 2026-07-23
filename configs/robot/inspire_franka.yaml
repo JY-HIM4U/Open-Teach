@@ -87,6 +87,16 @@ operators:
     orient_follow: ${orient_follow}
     orient_flip: ${orient_flip}
     orient_remap: null
+    # How the relative wrist rotation is applied to the EE:
+    #   body    (default, legacy): body delta post-multiplied onto the robot
+    #           reset orientation. The base axis you drive depends on the robot's
+    #           reset pose -> axis map must be recalibrated per reset pose
+    #           (docs/hand_to_robot_mapping.md §9.3).
+    #   spatial (reset-independent): world delta pre-multiplied. Base axis is a
+    #           fixed function of the axis map only -> calibrate once, trust it.
+    #           Recommended for orientation calibration; see
+    #           docs/orientation_pipeline_redesign.md.
+    orientation_mode: spatial # body
     # Reject wrist-orientation jumps larger than this in one frame (deg), holding
     # the last good orientation. With sign-continuity fixing flips at the source,
     # this is just a light safety net for rare 1-frame spikes. 45 (was 30) leaves
