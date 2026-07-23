@@ -403,3 +403,11 @@ reconstruction, the robot tracking, and position are already working.
 
 `scripts/fit_orient_remap.py` automates steps 2 using the commanded `quat*`
 signal (clean) with the wrist glitch-filtered the same way the operator does.
+
+**This empirical, per-axis calibration (9.5–9.6) is what
+`docs/orientation_pipeline_redesign.md` proposes to replace.** §9.3 above is
+exactly the defect that plan targets: because the mapping is reset-relative
+and the delta composition isn't a strictly-spatial (or strictly-body) form,
+the correct `orient_remap` isn't a fixed constant — it can shift with the
+reset pose. The redesign fixes the composition itself (Phase 3) so a single
+fixed `C`, shared with position, is sufficient — no per-axis tuning step.
