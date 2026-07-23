@@ -97,6 +97,17 @@ operators:
     #           Recommended for orientation calibration; see
     #           docs/orientation_pipeline_redesign.md.
     orientation_mode: spatial # body
+    # How the wrist displacement drives EE position:
+    #   legacy (default): displacement in the reset-time hand frame, conjugated
+    #          through the fixed H_A_R (-45deg + 6cm Allegro mount). Reset-pose
+    #          dependent AND skewed -> hand-along-one-axis drives the robot
+    #          diagonally, and the map changes with the hand tilt at reset.
+    #          (This is the "sometimes weird x/y/z" cause; see §5.)
+    #   world  (reset-independent, skew-free): world-frame wrist displacement
+    #          mapped straight through axis_remap. Effective map == axis_remap
+    #          (zero off-axis leak if it's a clean permutation). Recalibrate
+    #          axis_remap once for this mode via the 3-direction dry-run.
+    position_mode: world #legacy
     # Reject wrist-orientation jumps larger than this in one frame (deg), holding
     # the last good orientation. With sign-continuity fixing flips at the source,
     # this is just a light safety net for rare 1-frame spikes. 45 (was 30) leaves
@@ -105,7 +116,7 @@ operators:
     # World->robot axis calibration (from the 3-direction dry-run test).
     axis_remap:
       - [0, 0, 1]
-      - [1, 0, 0]
+      - [-1, 0, 0]
       - [0, 1, 0]
 
 # Controllers instantiated for recording (data collection). The hand is driven

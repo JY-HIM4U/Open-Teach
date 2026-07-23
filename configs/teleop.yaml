@@ -30,7 +30,7 @@ workspace_box: 0.35      # half-size (m) of the arm safety clamp box (+/- per ax
 
 # Wrist-orientation following for the arm.
 orient_follow: true      # true = EE follows your wrist rotation; false = old behaviour
-orient_flip: [-1, 1, -1] # invert robot-Y(pitch) & robot-Z(yaw), keep robot-X(roll). Calibrated 2026-07-23.
+orient_flip: [1, 1, 1] # invert robot-Y(pitch) & robot-Z(yaw), keep robot-X(roll). Calibrated 2026-07-23.
 
 # Visualize 3D and 2D plots
 visualize_xela: false

@@ -65,6 +65,7 @@ class FrankaArmOperator(Operator):
         orient_flip = None,
         orient_glitch_deg = 30.0,
         orientation_mode = 'body',
+        position_mode = 'legacy',
     ):
         self.notify_component_start('franka arm operator')
         # Half-size (m) of the per-axis workspace clamp box around the reset
@@ -101,13 +102,29 @@ class FrankaArmOperator(Operator):
         if self.orientation_mode not in ('body', 'spatial'):
             raise ValueError("orientation_mode must be 'body' or 'spatial', got %r"
                              % orientation_mode)
+        # position_mode: how the wrist displacement drives the EE position.
+        #   'legacy' (default): displacement is expressed in the reset-time hand
+        #            frame and conjugated through the fixed H_A_R (-45deg + 6cm
+        #            Allegro mount). Reset-pose dependent AND skewed -> moving the
+        #            hand along one axis drives the robot diagonally, and the
+        #            mapping changes with how the hand was tilted at reset.
+        #   'world'  (reset-independent, skew-free): the WORLD-frame wrist
+        #            displacement (t_now - t_reset) mapped straight through
+        #            axis_remap. Effective map == axis_remap (a clean permutation
+        #            if axis_remap is one) -> zero off-axis leak, same regardless
+        #            of reset orientation. Recalibrate axis_remap once for it.
+        self.position_mode = str(position_mode).lower()
+        if self.position_mode not in ('legacy', 'world'):
+            raise ValueError("position_mode must be 'legacy' or 'world', got %r"
+                             % position_mode)
         # Reject wrist-orientation jumps larger than this per frame (deg). 0 off.
         self._orient_glitch_rad = np.radians(float(orient_glitch_deg))
         self._prev_wrist_R = None
-        print('[franka operator] BUILD 2026-07-23 : orient glitch guard ACTIVE '
-              '(orient_glitch_deg=%s, orient_follow=%s, orientation_mode=%s) + wpos logging'
-              % (orient_glitch_deg, self.orient_follow, self.orientation_mode),
-              flush=True)
+        print('[franka operator] BUILD 2026-07-23b : glitch guard ACTIVE '
+              '(orient_glitch_deg=%s, orient_follow=%s, orientation_mode=%s, '
+              'position_mode=%s) + wpos logging'
+              % (orient_glitch_deg, self.orient_follow, self.orientation_mode,
+                 self.position_mode), flush=True)
         # Correct the Unity(left-handed, Y-up) vs robot(right-handed, Z-up)
         # handedness mismatch that makes hand-up map to robot-down. When True,
         # the vertical component of the mapped displacement is negated so
@@ -390,9 +407,16 @@ class FrankaArmOperator(Operator):
 
         # World->robot axis calibration on the displacement from the reset pose:
         # first the configurable axis_remap (which robot axis each hand direction
-        # drives), then the optional vertical flip. Identity remap + no flip
-        # reproduces the original behaviour.
-        disp = H_RT_RH[:3, 3] - H_RI_RH[:3, 3]
+        # drives), then the optional vertical flip.
+        if self.position_mode == 'world':
+            # Reset-independent, skew-free: map the WORLD-frame wrist displacement
+            # (t_now - t_reset) straight through axis_remap -- no H_A_R rotation,
+            # no reset-hand-frame. Effective map == axis_remap.
+            disp = H_HT_HH[:3, 3] - H_HI_HH[:3, 3]
+        else:
+            # legacy: displacement in the reset-time hand frame, conjugated
+            # through H_A_R (reset-pose dependent + -45deg skew).
+            disp = H_RT_RH[:3, 3] - H_RI_RH[:3, 3]
         disp = self.axis_remap @ disp
         if self.flip_vertical:
             disp[2] = -disp[2]
