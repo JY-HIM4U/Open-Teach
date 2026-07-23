@@ -87,6 +87,10 @@ class FrankaArmOperator(Operator):
         # Reject wrist-orientation jumps larger than this per frame (deg). 0 off.
         self._orient_glitch_rad = np.radians(float(orient_glitch_deg))
         self._prev_wrist_R = None
+        print('[franka operator] BUILD 2026-07-22b : orient glitch guard '
+              'ACTIVE (orient_glitch_deg=%s, orient_follow=%s) + wpos logging'
+              % (orient_glitch_deg, self.orient_follow if hasattr(self, "orient_follow") else "?"),
+              flush=True)
         # Correct the Unity(left-handed, Y-up) vs robot(right-handed, Z-up)
         # handedness mismatch that makes hand-up map to robot-down. When True,
         # the vertical component of the mapped displacement is negated so
@@ -179,7 +183,13 @@ class FrankaArmOperator(Operator):
              'Fx', 'Fy', 'Fz', 'Tx', 'Ty', 'Tz',
              # RAW wrist orientation (Quest hand frame) quaternion -> used to
              # calibrate the wrist->robot rotation mapping (orient_remap).
-             'wq0', 'wq1', 'wq2', 'wq3'])
+             'wq0', 'wq1', 'wq2', 'wq3',
+             # RAW wrist world position (Quest hand frame origin, un-rotated) ->
+             # paired with wq*, lets us reconstruct the relative wrist motion
+             # since reset (H_HT_HI) offline and fit the position mapping
+             # (axis_remap) from logs. Difference against the reset-frame sample
+             # per teleop segment; absolute frame offsets cancel.
+             'wpos_x', 'wpos_y', 'wpos_z'])
 
     @property
     def timer(self):
@@ -464,11 +474,16 @@ class FrankaArmOperator(Operator):
             except Exception as e:
                 if self._dry_run_counter % 120 == 0:
                     print('[REC] proprio read failed: %s' % e)
-            # Raw wrist orientation (Quest hand frame) for orientation calibration.
+            # Raw wrist orientation + world position (Quest hand frame) for
+            # calibration. hand_moving_H is the un-rotated wrist frame this
+            # frame: [:3,:3] = orientation, [:3,3] = world position (origin).
             try:
                 wq = Rotation.from_matrix(self.hand_moving_H[:3, :3]).as_quat()
                 for i in range(4):
                     row['wq%d' % i] = round(float(wq[i]), 5)
+                wt = self.hand_moving_H[:3, 3]
+                for lbl, i in (('wpos_x', 0), ('wpos_y', 1), ('wpos_z', 2)):
+                    row[lbl] = round(float(wt[i]), 5)
             except Exception:
                 pass
         self._recorder.maybe_log(row)

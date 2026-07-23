@@ -8,7 +8,7 @@ from openteach.utils.timer import FrequencyTimer
 
 class TransformHandPositionCoords(Component):
     def __init__(self, host, keypoint_port, transformation_port,moving_average_limit = 5,
-                 sign_continuity = True):
+                 sign_continuity = True, frame_glitch_deg = 45.0):
         self.notify_component_start('keypoint position transform')
 
         # Initializing the subscriber for right hand keypoints
@@ -33,6 +33,21 @@ class TransformHandPositionCoords(Component):
         self.sign_continuity = sign_continuity
         self._prev_palm_normal = None
 
+        # Single-frame outlier rejection for the WRIST/ARM frame. Quest hand
+        # tracking occasionally spits out a ~180deg-flipped pose for one frame
+        # at extreme wrist poses; sign-continuity (which only guards palm_normal)
+        # does not catch these, and feeding one into the 5-sample moving average
+        # corrupts the arm orientation for several frames. Reject any frame whose
+        # rotation jumps more than frame_glitch_deg from the last good one and
+        # hold the last good ROTATION (position/origin still flows through), so
+        # the average downstream never sees the flip. Same threshold idea as the
+        # operator's orient_glitch_deg, but applied at the source before averaging.
+        self.frame_glitch_deg = frame_glitch_deg
+        self._prev_good_frame = None
+        print('[keypoint_transform] BUILD 2026-07-22b : orthonormal arm frame + '
+              'outlier-reject filter ACTIVE (frame_glitch_deg=%s, sign_continuity=%s)'
+              % (frame_glitch_deg, sign_continuity), flush=True)
+
     # Keep the palm normal on the same hemisphere as the previous frame so a
     # sign inversion of cross(index, pinky) doesn't flip the whole wrist frame.
     def _sign_continuous_normal(self, palm_normal):
@@ -41,6 +56,26 @@ class TransformHandPositionCoords(Component):
                 palm_normal = -palm_normal
         self._prev_palm_normal = palm_normal
         return palm_normal
+
+    # Reject single-frame ~180deg tracking flips in the wrist/arm frame. Compares
+    # the new frame's rotation (the 3 basis vectors) against the last accepted one;
+    # if it jumped more than frame_glitch_deg, hold the last good ROTATION but keep
+    # the new origin so wrist position keeps tracking. hand_dir_frame is
+    # [origin, X, Y, Z]; the basis rows are already orthonormal (see _get_coord_frame
+    # / _get_hand_dir_frame), so trace() gives the geodesic angle directly.
+    def _reject_frame_glitch(self, hand_dir_frame):
+        if self.frame_glitch_deg is None or self.frame_glitch_deg <= 0:
+            return hand_dir_frame
+        R_cur = np.asarray(hand_dir_frame[1:], dtype=float)
+        if self._prev_good_frame is not None:
+            R_prev = np.asarray(self._prev_good_frame[1:], dtype=float)
+            cos = (np.trace(R_cur @ R_prev.T) - 1.0) / 2.0
+            ang = np.degrees(np.arccos(np.clip(cos, -1.0, 1.0)))
+            if ang > self.frame_glitch_deg:
+                # Reject: keep fresh wrist position, hold last good rotation.
+                return [hand_dir_frame[0]] + list(self._prev_good_frame[1:])
+        self._prev_good_frame = hand_dir_frame
+        return hand_dir_frame
 
     # Function to get the hand coordinates from the VR
     def _get_hand_coords(self):
@@ -64,9 +99,15 @@ class TransformHandPositionCoords(Component):
         return [cross_product, palm_direction, palm_normal]
 
     # Create a coordinate frame for the arm. Uses the same sign-corrected palm_normal.
+    # cross_product is DERIVED from cross(palm_direction, palm_normal) -- NOT from an
+    # independent (index - pinky) difference -- so the three axes are guaranteed
+    # orthonormal and right-handed, and cross_product's sign is tied to the
+    # sign-continuous palm_normal. The old (index - pinky) axis was neither
+    # orthogonalized nor sign-stabilized, so during roll/yaw the triple flipped
+    # handedness ~180deg (bimodal 0/180 wrist frame -> arm couldn't follow roll/yaw).
     def _get_hand_dir_frame(self, origin_coord, index_knuckle_coord, pinky_knuckle_coord, palm_normal):
         palm_direction = normalize_vector(index_knuckle_coord + pinky_knuckle_coord)         # Unity space - Z
-        cross_product = normalize_vector(index_knuckle_coord - pinky_knuckle_coord)          # Unity space - X
+        cross_product = normalize_vector(np.cross(palm_direction, palm_normal))              # Unity space - X
 
         return [origin_coord, cross_product, palm_normal, palm_direction]
 
@@ -107,6 +148,10 @@ class TransformHandPositionCoords(Component):
                
                 # Shift the points to required axes
                 transformed_hand_coords, translated_hand_coord_frame = self.transform_keypoints(hand_coords)
+
+                # Reject single-frame tracking flips in the arm frame BEFORE the
+                # moving average, so one bad frame can't corrupt several outputs.
+                translated_hand_coord_frame = self._reject_frame_glitch(translated_hand_coord_frame)
 
                 # Passing the transformed coords into a moving average
                 self.averaged_hand_coords = moving_average(

@@ -324,3 +324,82 @@ Instead:
 
 Option 1 is a fallback if time-constrained, with the explicit understanding
 that it does not resolve the rotation/position coupling — only Option 2 does.
+
+---
+
+## 9. Why orientation is harder than position (plain-language)
+
+A recurring, reasonable question: *"Once we command an orientation, the Franka
+just tracks it — so why is orientation hard to get right?"*
+
+**The robot tracking the orientation is the easy part, and it already works.**
+Command the Franka any end-effector orientation and it reaches it accurately;
+the recorded `quat*` (commanded) vs `cur_q*` (achieved) columns confirm the arm
+follows. The difficulty is **not** the robot. It is the *translation layer*
+that decides **which** orientation to command from your hand's orientation.
+Four properties make that translation hard — and only for rotation, not
+position:
+
+### 9.1 Position is three independent sliders; rotation is not
+Position `x/y/z` are independent. "Hand moves right → robot +Y" is a per-axis
+rule you can fix one axis at a time without disturbing the others — which is why
+`axis_remap` is easy to tune and position "feels right" quickly. Rotations are
+**coupled**: rotating about one axis changes where the other two axes point, and
+composition order matters (`roll∘pitch ≠ pitch∘roll`). There is no knob that
+remaps one rotation axis while leaving the other two untouched. This is the
+single biggest reason position calibrates in minutes and orientation does not.
+
+### 9.2 Two coordinate worlds that disagree on handedness
+The Quest reports the hand in Unity space: **left-handed, X=right, Y=up,
+Z=forward** (§2). The robot base frame is **right-handed, Z-up** (see the Franka
+base-frame note). Converting a *rotation* between a left-handed and a
+right-handed frame is exactly where "mirrored / backwards / inverted-turn" bugs
+come from. Position only picks up a sign flip; a rotation can have its entire
+sense of "clockwise vs counter-clockwise" inverted. `orient_flip`
+(`diag(±1,±1,±1)`) exists to absorb these per-axis sign inversions.
+
+### 9.3 Everything is measured relative to a reset
+The pipeline maps the *change* in wrist orientation since the last teleop
+resume, not an absolute pose (§4, `R_rel = H_HT_HI[:3,:3]`). At the reset
+instant the hand has some arbitrary orientation and the robot has its own
+(`H_HI_HH`, `H_RI_RH`). The mapping is therefore
+"change-from-hand-reset → change-from-robot-reset", and those two arbitrary
+reset poses **rotate the whole axis correspondence**. Practical consequence:
+the correct `orient_remap` **cannot be read directly off a recording**, because
+the robot's reset-orientation offset rotates whichever base axis a given hand
+twist appears to drive. This is why the axis map is calibrated empirically
+(set → test → correct signs), not fit from logs.
+
+### 9.4 The tracking noise hits rotation specifically
+The Quest occasionally emits a ~180°-flipped hand pose for a frame or two
+(§2, §4). Position barely notices; orientation is destroyed by a 180° flip.
+This is handled — `sign_continuity` at the source and `orient_glitch_deg` in the
+operator reject the flips, so the *commanded* orientation stays smooth (the
+robot never sees them). Note the flips still appear in the **logged `wq*`
+column**, which is recorded pre-guard: that is a cosmetic logging artifact, not
+a robot fault. Analyze the commanded `quat*` (post-guard) for the true behavior.
+
+### 9.5 So what is `orient_remap`?
+A 3×3 signed-permutation table: *"a twist about THIS hand axis becomes a twist
+about THAT robot axis, in THIS direction."* It is the orientation twin of
+`axis_remap` (which does the same for position `x/y/z`). Defaults to `null`,
+in which case orientation reuses `axis_remap` as its `C` (§4, §7). Because of
+9.1–9.3, the correct entries can't be read off the sensor — you set it, do one
+slow single-axis motion per axis, observe, and correct any sign with
+`orient_flip`. That one-time calibration is the entire remaining task; the
+reconstruction, the robot tracking, and position are already working.
+
+### 9.6 Calibration procedure (empirical, ~2 minutes)
+1. Record **one slow, isolated motion per axis** — roll alone, then pitch alone,
+   then yaw alone (§ "Two things to get right", each ~10 s, large angle). Do
+   them as separate clips or one clip; single-axis is what matters. Roll is the
+   flip-prone one — go slow and keep the palm facing the headset.
+2. For each clip, read which robot axis the commanded orientation moved about
+   (`scripts/fit_orient_remap.py`), giving the current hand-axis→robot-axis map.
+3. If an axis drives the wrong robot axis → fix with `orient_remap`
+   (swap the rows). If it drives the right axis but the wrong way → fix with
+   `orient_flip` (negate that axis).
+4. Re-validate in dry-run, then go live in Low Resolution.
+
+`scripts/fit_orient_remap.py` automates steps 2 using the commanded `quat*`
+signal (clean) with the wrist glitch-filtered the same way the operator does.
